@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
+	"regexp"
 
 	"github.com/free/sql_exporter/config"
 	"github.com/free/sql_exporter/errors"
@@ -108,6 +110,8 @@ func (q *Query) Collect(ctx context.Context, conn *sql.DB, ch chan<- Metric) {
 
 // run executes the query on the provided database, in the provided context.
 func (q *Query) run(ctx context.Context, conn *sql.DB) (*sql.Rows, errors.WithContext) {
+	r, _ := regexp.Compile("\\s+")
+	queryString := r.ReplaceAllString(q.config.Query, " ")
 	if q.conn != nil && q.conn != conn {
 		panic(fmt.Sprintf("[%s] Expecting to always run on the same database handle", q.logContext))
 	}
@@ -120,7 +124,11 @@ func (q *Query) run(ctx context.Context, conn *sql.DB) (*sql.Rows, errors.WithCo
 		q.conn = conn
 		q.stmt = stmt
 	}
+	stmtValue := reflect.ValueOf(q.stmt)
+	stmtQueryString := r.ReplaceAllString(reflect.Indirect(stmtValue).FieldByName("query").String(), " ")
 	rows, err := q.stmt.QueryContext(ctx)
+	columns, _ := rows.Columns()
+	log.Infof("run query [%s] stmt.query same? %t columns %q", queryString, (stmtQueryString == queryString), columns)
 	return rows, errors.Wrap(q.logContext, err)
 }
 
@@ -134,6 +142,8 @@ func (q *Query) scanDest(rows *sql.Rows) ([]interface{}, errors.WithContext) {
 
 	// Create the slice to scan the row into, with strings for keys and float64s for values.
 	dest := make([]interface{}, 0, len(columns))
+	r, _ := regexp.Compile("\\s+")
+	queryString := r.ReplaceAllString(q.config.Query, " ")[0:40]
 	have := make(map[string]bool, len(q.columnTypes))
 	for i, column := range columns {
 		switch q.columnTypes[column] {
@@ -145,9 +155,9 @@ func (q *Query) scanDest(rows *sql.Rows) ([]interface{}, errors.WithContext) {
 			have[column] = true
 		default:
 			if column == "" {
-				log.Warningf("[%s] Unnamed column %d returned by query", q.logContext, i)
+				log.Warningf("[%s] Unnamed column %d returned by query [%s]", q.logContext, i, queryString)
 			} else {
-				log.Warningf("[%s] Extra column %q returned by query", q.logContext, column)
+				log.Warningf("[%s] Extra column %q returned by query column[%d] query: [%s]", q.logContext, column, i, queryString)
 			}
 			dest = append(dest, new(interface{}))
 		}
@@ -161,7 +171,7 @@ func (q *Query) scanDest(rows *sql.Rows) ([]interface{}, errors.WithContext) {
 				missing = append(missing, c)
 			}
 		}
-		return nil, errors.Errorf(q.logContext, "column(s) %q missing from query result", missing)
+		return nil, errors.Errorf(q.logContext, "column(s) %q missing from query result %s", missing, queryString)
 	}
 
 	return dest, nil
